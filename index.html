@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hypefast Legal Tech Platform</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 p-6">
+
+  <div class="max-w-4xl mx-auto space-y-6">
+    <header class="border-b pb-4">
+      <h1 class="text-2xl font-bold text-slate-900">Hypefast Legal Tech Platform</h1>
+      <p class="text-sm text-slate-500">Automated BPOM Auto-Flagging & Vendor Contract Analyzer</p>
+    </header>
+
+    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 space-y-4">
+      <h2 class="text-lg font-semibold">1. Upload Dokumen / Gambar</h2>
+
+      <div>
+        <label for="apiKey" class="block text-sm font-medium mb-1">Gemini API Key</label>
+        <input type="password" id="apiKey" autocomplete="off" placeholder="Tempel API key dari Google AI Studio"
+               class="w-full border rounded-lg p-2.5 bg-slate-50">
+        <p class="text-xs text-slate-500 mt-1">
+          Key disimpan hanya di browser ini dan dikirim langsung ke Google. Jangan tulis key di dalam file HTML.
+        </p>
+      </div>
+
+      <div>
+        <label for="moduleType" class="block text-sm font-medium mb-1">Pilih Jenis Modul</label>
+        <select id="moduleType" class="w-full border rounded-lg p-2.5 bg-slate-50">
+          <option value="BPOM">Modul 1: Auto-Flagging BPOM (Gambar Kemasan/Iklan)</option>
+          <option value="CONTRACT">Modul 2: Contract Analyzer (PDF Kontrak Vendor)</option>
+        </select>
+      </div>
+
+      <div>
+        <label for="fileInput" class="block text-sm font-medium mb-1">Pilih File</label>
+        <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,application/pdf"
+               class="w-full border rounded-lg p-2 bg-slate-50">
+        <p class="text-xs text-slate-500 mt-1">Format: PDF, JPG, PNG, atau WebP. Maksimal 15 MB.</p>
+      </div>
+
+      <button type="button" onclick="processAnalysis()" id="btnSubmit"
+              class="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 disabled:cursor-not-allowed text-white font-medium py-2.5 rounded-lg transition">
+        Mulai Analisis dengan Gemini AI
+      </button>
+    </div>
+
+    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+      <h2 class="text-lg font-semibold mb-2">2. Status & Hasil Analisis AI</h2>
+      <div id="statusText" class="text-sm font-medium text-blue-600 mb-2">Status: Siap digunakan</div>
+      <pre id="outputResult" class="bg-slate-900 text-green-400 p-4 rounded-lg overflow-x-auto text-sm font-mono min-h-[150px] whitespace-pre-wrap">
+// Hasil analisis JSON dari Gemini akan tampil di sini...
+      </pre>
+    </div>
+  </div>
+
+  <script>
+    // Ganti jika model ini sudah tidak tersedia di akun Google AI Studio kamu
+    const GEMINI_MODEL = "gemini-2.5-flash";
+    const MAX_FILE_BYTES = 15 * 1024 * 1024;
+
+    const JSON_SCHEMA_HINT =
+      'Balas HANYA dengan JSON: {"risk_level":"low|medium|high","summary":"","findings":[{"category":"","severity":"low|medium|high","description":"","source_excerpt":"","recommendation":""}]}. Tulis semua isi dalam Bahasa Indonesia.';
+
+    const PROMPTS = {
+      BPOM:
+        "Kamu ahli regulasi BPOM Indonesia. Analisis gambar kemasan/iklan ini dan temukan klaim atau elemen yang berpotensi melanggar aturan BPOM (klaim kesehatan tanpa izin, klaim menyembuhkan, label tidak lengkap, dll). " +
+        JSON_SCHEMA_HINT,
+      CONTRACT:
+        "Kamu ahli hukum kontrak di Indonesia. Analisis kontrak vendor ini dan temukan klausul berisiko (penalti, terminasi sepihak, ganti rugi, eksklusivitas, yurisdiksi, dll). " +
+        JSON_SCHEMA_HINT
+    };
+
+    const statusText = document.getElementById('statusText');
+    const output = document.getElementById('outputResult');
+    const btn = document.getElementById('btnSubmit');
+
+    function setStatus(text, color) {
+      statusText.innerText = text;
+      statusText.className = "text-sm font-medium mb-2 text-" + color + "-600";
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      try {
+        const saved = localStorage.getItem('gemini_key');
+        if (saved) document.getElementById('apiKey').value = saved;
+      } catch (e) { /* localStorage tidak tersedia, abaikan */ }
+    });
+
+    async function processAnalysis() {
+      const file = document.getElementById('fileInput').files[0];
+      const moduleType = document.getElementById('moduleType').value;
+      const apiKey = document.getElementById('apiKey').value.trim();
+
+      if (!apiKey) { alert("Isi Gemini API Key terlebih dahulu."); return; }
+      if (!file) { alert("Pilih file terlebih dahulu."); return; }
+      if (file.size > MAX_FILE_BYTES) { alert("File lebih dari 15 MB. Kecilkan ukurannya lalu coba lagi."); return; }
+
+      try { localStorage.setItem('gemini_key', apiKey); } catch (e) {}
+
+      btn.disabled = true;
+      setStatus("Status: Membaca file...", "amber");
+      output.innerText = "Memproses file...";
+
+      try {
+        const base64File = await convertToBase64(file);
+        const mimeType = file.type || (file.name.toLowerCase().endsWith(".pdf") ? "application/pdf" : "");
+        if (!mimeType) throw new Error("Jenis file tidak dikenali. Gunakan PDF, JPG, PNG, atau WebP.");
+
+        setStatus("Status: Mengirim ke Gemini...", "amber");
+
+        const res = await fetch(
+          "https://generativelanguage.googleapis.com/v1beta/models/" + GEMINI_MODEL + ":generateContent",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+            body: JSON.stringify({
+              contents: [{ parts: [
+                { text: PROMPTS[moduleType] },
+                { inline_data: { mime_type: mimeType, data: base64File } }
+              ]}],
+              generationConfig: { responseMimeType: "application/json" }
+            })
+          }
+        );
+
+        const json = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          const msg = json.error && json.error.message ? json.error.message : "Gemini API error (" + res.status + ")";
+          if (res.status === 400 && /API key/i.test(msg)) throw new Error("API key tidak valid. Periksa lagi key dari Google AI Studio.");
+          if (res.status === 403) throw new Error("Akses ditolak (403). Pastikan API key aktif dan tidak dibatasi ke domain lain. " + msg);
+          if (res.status === 404) throw new Error("Model '" + GEMINI_MODEL + "' tidak ditemukan. Ganti GEMINI_MODEL di kode dengan model yang tersedia. " + msg);
+          if (res.status === 429) throw new Error("Kuota Gemini habis atau terlalu banyak permintaan. Tunggu sebentar lalu coba lagi.");
+          throw new Error(msg);
+        }
+
+        const text = json.candidates && json.candidates[0] && json.candidates[0].content
+          && json.candidates[0].content.parts && json.candidates[0].content.parts[0]
+          ? json.candidates[0].content.parts[0].text : null;
+
+        if (!text) {
+          const reason = json.promptFeedback && json.promptFeedback.blockReason;
+          throw new Error(reason ? "Gemini menolak memproses file (" + reason + ")." : "Gemini tidak mengembalikan hasil. Coba file lain.");
+        }
+
+        let parsed;
+        try { parsed = JSON.parse(text); } catch (e) { parsed = { raw: text }; }
+
+        setStatus("Status: Selesai!", "green");
+        output.innerText = JSON.stringify(parsed, null, 2);
+
+      } catch (err) {
+        setStatus("Status: Terjadi Kesalahan", "red");
+        output.innerText = "Error: " + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function convertToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = () => reject(new Error("File tidak bisa dibaca."));
+      });
+    }
+  </script>
+</body>
+</html>
