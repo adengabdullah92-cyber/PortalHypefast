@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hypefast Legal Tech & Compliance</title>
+  <!-- Tailwind CSS CDN untuk styling cepat -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Supabase JS Client CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 p-6">
+
+  <div class="max-w-4xl mx-auto space-y-6">
+    <!-- Header -->
+    <header class="border-b pb-4">
+      <h1 class="text-2xl font-bold text-slate-900">Hypefast Legal Tech Platform</h1>
+      <p class="text-sm text-slate-500">Automated BPOM Auto-Flagging & Vendor Contract Analyzer</p>
+    </header>
+
+    <!-- Form Upload Analisis -->
+    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+      <h2 class="text-lg font-semibold mb-4">1. Upload Dokumen / Gambar</h2>
+      
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium mb-1">Pilih Jenis Modul</label>
+          <select id="moduleType" class="w-full border rounded-lg p-2.5 bg-slate-50">
+            <option value="BPOM">Modul 1: Auto-Flagging BPOM (Gambar Kemasan/Iklan)</option>
+            <option value="CONTRACT">Modul 2: Contract Analyzer (PDF Kontrak Vendor)</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-sm font-medium mb-1">Pilih File</label>
+          <input type="file" id="fileInput" class="w-full border rounded-lg p-2 bg-slate-50">
+        </div>
+
+        <button onclick="processAnalysis()" id="btnSubmit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg transition">
+          Mulai Analisis dengan Gemini AI
+        </button>
+      </div>
+    </div>
+
+    <!-- Output Hasil Analisis -->
+    <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+      <h2 class="text-lg font-semibold mb-4">2. Hasil Analisis AI</h2>
+      <div id="loading" class="hidden text-center py-6 text-slate-500">
+        <p class="animate-pulse">Sedang memproses dokumen dengan Gemini API...</p>
+      </div>
+      <pre id="outputResult" class="bg-slate-900 text-green-400 p-4 rounded-lg overflow-x-auto text-sm font-mono min-h-[150px]">
+// Hasil analisis JSON dari Gemini akan tampil di sini...
+      </pre>
+    </div>
+  </div>
+
+  <script>
+    // Konfigurasi Supabase
+    const SUPABASE_URL = "https://xyzxxxxxxxx.supabase.co"; // Ganti dengan Supabase URL kamu
+    const SUPABASE_ANON_KEY = "eyJhbGciOi...";              // Ganti dengan Supabase Anon Key kamu
+    const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    async function processAnalysis() {
+      const moduleType = document.getElementById('moduleType').value;
+      const fileInput = document.getElementById('fileInput').files[0];
+      const output = document.getElementById('outputResult');
+      const loading = document.getElementById('loading');
+
+      if (!fileInput) {
+        alert("Pilih file terlebih dahulu!");
+        return;
+      }
+
+      loading.classList.remove('hidden');
+      output.innerText = "";
+
+      try {
+        // 1. Convert File ke Base64
+        const base64File = await convertToBase64(fileInput);
+
+        // 2. Panggil Supabase Edge Function (Gemini dipanggil dari backend Supabase yang aman)
+        const { data, error } = await supabase.functions.invoke('gemini-analyzer', {
+          body: {
+            module: moduleType,
+            fileName: fileInput.name,
+            fileType: fileInput.type,
+            fileData: base64File
+          }
+        });
+
+        if (error) throw error;
+
+        // 3. Tampilkan Hasil JSON Terstruktur
+        output.innerText = JSON.stringify(data, null, 2);
+
+      } catch (err) {
+        output.innerText = "Error: " + err.message;
+      } finally {
+        loading.classList.add('hidden');
+      }
+    }
+
+    function convertToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = error => reject(error);
+      });
+    }
+  </script>
+</body>
+</html>
