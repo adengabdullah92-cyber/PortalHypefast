@@ -24,7 +24,8 @@ body{margin:0;background:var(--paper);color:var(--ink);font:400 15px/1.55 var(--
 h1,h2,h3{font-family:var(--serif);font-weight:600;line-height:1.2;margin:0 0 .5rem;letter-spacing:-.005em}
 h1{font-size:1.75rem} h2{font-size:1.3rem} h3{font-size:1.08rem}
 a{color:var(--accent)} p{margin:.4rem 0 .8rem}
-.top{background:var(--ink);color:#fff;display:flex;align-items:center;gap:1rem;padding:.7rem 1.25rem;justify-content:space-between}
+.top{background:#17212B;color:#fff;display:flex;align-items:center;gap:1rem;padding:.7rem 1.25rem;justify-content:space-between}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .top{background:#0A0F14;border-bottom:1px solid var(--line)}}
 .brand{font:600 1.15rem var(--serif);color:#fff;text-decoration:none}
 .brand small{font:400 .8rem var(--sans);opacity:.7;margin-left:.5rem}
 .who{display:flex;gap:.75rem;align-items:center;font-size:.85rem}
