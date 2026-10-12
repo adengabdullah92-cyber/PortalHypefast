@@ -214,7 +214,9 @@ create table public.npd_screenings (
   id uuid primary key default gen_random_uuid(),
   created_by uuid not null default auth.uid() references public.profiles(id),
   title text not null, answers jsonb not null, matched jsonb not null, ai_summary text,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  review_status text not null default 'menunggu' check (review_status in ('menunggu','divalidasi','perlu_perbaikan')),
+  reviewed_by uuid references public.profiles(id), reviewed_at timestamptz, reviewer_note text
 );
 
 create table public.tickets (
@@ -405,7 +407,7 @@ do $$ declare t text; begin
   foreach t in array array['profiles','agreements','access_grants','reg_documents','product_categories','agreement_field_defs','npd_rules','tickets','app_settings'] loop
     execute format('create trigger audit_%1$s after insert or update or delete on public.%1$s for each row execute function public.audit_trigger()', t);
   end loop;
-  foreach t in array array['agreement_fields','review_findings'] loop
+  foreach t in array array['agreement_fields','review_findings','npd_screenings'] loop
     execute format('create trigger audit_%1$s after update or delete on public.%1$s for each row execute function public.audit_trigger()', t);
   end loop;
 end $$;
@@ -452,7 +454,8 @@ create policy "temuan: legal putuskan" on public.review_findings for update usin
 create policy "temuan: legal hapus" on public.review_findings for delete using (public.is_legal());
 
 create policy "skrining: pemilik atau legal baca" on public.npd_screenings for select using (created_by = auth.uid() or public.is_legal());
-create policy "skrining: NPD dan legal buat" on public.npd_screenings for insert with check (created_by = auth.uid() and public.app_role() in ('npd','legal'));
+create policy "skrining: NPD dan legal buat" on public.npd_screenings for insert with check (created_by = auth.uid() and public.app_role() in ('npd','legal') and (public.is_legal() or (review_status = 'menunggu' and reviewed_by is null and reviewed_at is null)));
+create policy "skrining: legal ubah" on public.npd_screenings for update using (public.is_legal()) with check (public.is_legal());
 
 create policy "tiket: baca" on public.tickets for select using (public.is_member() and (created_by = auth.uid() or public.is_legal()));
 create policy "tiket: buat sendiri" on public.tickets for insert with check (public.is_member() and created_by = auth.uid());
@@ -691,6 +694,36 @@ select * from (values
  ('{obat_tradisional}'::text[], 'PerBPOM 25/2021 (CPOTB)', '25/2021', 'Penerapan cara pembuatan obat tradisional yang baik', 'perlu_dicek', 'https://jdih.pom.go.id/download/rule/1308/25/2021/Peraturan%20Badan%20Pengawas%20Obat%20dan%20Makanan%20Nomor%2025%20Tahun%202021%20tentang%20Penerapan%20Cara%20Pembuatan%20Obat%20Tradisional%20yang%20Baik', 'Istilah sertifikat bergeser ke CPOBAB di rancangan revisi PerBPOM 25/2023. Cek apakah masih berlaku atau sudah diganti.', 1308)
 ) as v(categories, title, number, about, status, source_url, notes, jdih_id)
 where not exists (select 1 from public.reg_documents r where r.title = v.title);
+</script>
+
+<script type="text/plain" id="tpl-sql-v3">
+-- =====================================================================
+-- Migrasi v3: validasi Legal atas hasil skrining NPD (bisa diedit ulang)
+-- Untuk database yang SUDAH dipasang. Aman dijalankan ulang.
+-- =====================================================================
+alter table public.npd_screenings add column if not exists review_status text not null default 'menunggu';
+alter table public.npd_screenings add column if not exists reviewed_by uuid references public.profiles(id);
+alter table public.npd_screenings add column if not exists reviewed_at timestamptz;
+alter table public.npd_screenings add column if not exists reviewer_note text;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'npd_screenings_review_status_check') then
+    alter table public.npd_screenings add constraint npd_screenings_review_status_check check (review_status in ('menunggu','divalidasi','perlu_perbaikan'));
+  end if;
+end $$;
+
+-- Pembuat skrining non-Legal tidak boleh menyetujui hasilnya sendiri
+drop policy if exists "skrining: NPD dan legal buat" on public.npd_screenings;
+create policy "skrining: NPD dan legal buat" on public.npd_screenings for insert
+  with check (created_by = auth.uid() and public.app_role() in ('npd','legal')
+    and (public.is_legal() or (review_status = 'menunggu' and reviewed_by is null and reviewed_at is null)));
+
+-- Hanya Legal yang boleh mengubah (validasi, catatan, perbarui hasil)
+drop policy if exists "skrining: legal ubah" on public.npd_screenings;
+create policy "skrining: legal ubah" on public.npd_screenings for update using (public.is_legal()) with check (public.is_legal());
+
+-- Perubahan tercatat di audit trail
+drop trigger if exists audit_npd_screenings on public.npd_screenings;
+create trigger audit_npd_screenings after update or delete on public.npd_screenings for each row execute function public.audit_trigger();
 </script>
 
 <script type="text/plain" id="tpl-fn-jdih">
@@ -1302,10 +1335,12 @@ document.addEventListener('change', e => { const t = e.target.closest('[data-cha
    MODUL 3: Skrining perizinan NPD
    ============================================================ */
 VIEWS.npd = async r => { if (r.a === 'new') return npdNew(); if (r.a) return npdDetail(r.a); return npdList(); };
+const NPD_REVIEW = { menunggu: ['Menunggu review Legal', 's-wait'], divalidasi: ['Divalidasi Legal', 's-ok'], perlu_perbaikan: ['Perlu perbaikan', 's-mid'] };
+const npdStamp = st => { const x = NPD_REVIEW[st] || NPD_REVIEW.menunggu; return stamp(x[0], x[1]); };
 async function npdList() {
-  const rows = await q(S.sb.from('npd_screenings').select('id,title,created_by,created_at,answers,matched').order('created_at', { ascending: false }));
+  const rows = await q(S.sb.from('npd_screenings').select('id,title,created_by,created_at,answers,matched,review_status').order('created_at', { ascending: false }));
   main().innerHTML = `<div class="head"><div><h1>Skrining perizinan NPD</h1><p>Isi kuesioner singkat di awal ide produk. Sistem mencocokkan jawaban dengan matriks aturan yang disusun dan divalidasi Legal dan Compliance.</p></div><a class="btn" href="#/npd/new">Skrining baru</a></div>
-  ${rows.length ? `<div class="scroll"><table><thead><tr><th>Ide produk</th><th>Kategori</th><th>Izin cocok</th>${isLegal() ? '<th>Pembuat</th>' : ''}<th>Tanggal</th></tr></thead><tbody>${rows.map(s => `<tr><td><a href="#/npd/${s.id}"><b>${esc(s.title)}</b></a></td><td>${esc(catName(s.answers.category))}</td><td>${s.matched.length}</td>${isLegal() ? `<td>${esc(pname(s.created_by))}</td>` : ''}<td>${fmtD(s.created_at)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Belum ada skrining. Mulai dari ide produk yang sedang dibrainstorm.</div>'}`;
+  ${rows.length ? `<div class="scroll"><table><thead><tr><th>Ide produk</th><th>Kategori</th><th>Izin cocok</th><th>Status</th>${isLegal() ? '<th>Pembuat</th>' : ''}<th>Tanggal</th></tr></thead><tbody>${rows.map(s => `<tr><td><a href="#/npd/${s.id}"><b>${esc(s.title)}</b></a></td><td>${esc(catName(s.answers.category))}</td><td>${s.matched.length}</td><td>${npdStamp(s.review_status)}</td>${isLegal() ? `<td>${esc(pname(s.created_by))}</td>` : ''}<td>${fmtD(s.created_at)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Belum ada skrining. Mulai dari ide produk yang sedang dibrainstorm.</div>'}`;
 }
 function npdNew() {
   main().innerHTML = `<p><a href="#/npd">Semua skrining</a></p><div class="head"><div><h1>Skrining baru</h1></div></div>
@@ -1338,15 +1373,51 @@ async function npdDetail(id) {
   const s = await q(S.sb.from('npd_screenings').select('*').eq('id', id).single()); S.npd = s; const a = s.answers;
   const grp = (ob, title, cls) => { const l = s.matched.filter(m => m.obligation === ob); return l.length ? `<h2>${title}</h2>${l.map(m => `<div class="finding ${cls}"><div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(m.name)}</h3>${ob === 'wajib' ? stamp('Wajib', 's-high') : stamp('Pastikan dengan Legal', 's-mid')}</div>
     ${m.requirement ? `<p>${nl(m.requirement)}</p>` : ''}${m.explanation ? `<p class="muted">${nl(m.explanation)}</p>` : ''}<dl><dt>Rujukan</dt><dd>${esc(m.regulation_ref || '—')}</dd>${m.notes ? `<dt>Catatan</dt><dd>${nl(m.notes)}</dd>` : ''}</dl></div>`).join('')}` : ''; };
+  let stale = [];
+  if (isLegal() && s.review_status === 'divalidasi' && s.reviewed_at) {
+    try {
+      const inCat = x => !x.categories || !x.categories.length || x.categories.includes(a.category);
+      const [rr, dd] = await Promise.all([
+        q(S.sb.from('npd_rules').select('name,categories').gt('updated_at', s.reviewed_at)),
+        q(S.sb.from('reg_documents').select('title,categories').gt('updated_at', s.reviewed_at))]);
+      stale = [...rr.filter(inCat).map(x => x.name), ...dd.filter(inCat).map(x => x.title)];
+    } catch (e) { stale = []; }
+  }
   main().innerHTML = `<p class="noprint"><a href="#/npd">Semua skrining</a></p>
-  <div class="head"><div><h1>${esc(s.title)}</h1><p>${esc(catName(a.category))} · ${fmtD(s.created_at)} · oleh ${esc(pname(s.created_by))}</p></div>
+  <div class="head"><div><h1>${esc(s.title)}</h1><p>${esc(catName(a.category))} · ${fmtD(s.created_at)} · oleh ${esc(pname(s.created_by))}</p><p style="margin-top:.4rem">${npdStamp(s.review_status)}${s.review_status !== 'menunggu' && s.reviewed_at ? ` <span class="small muted">oleh ${esc(pname(s.reviewed_by))}, ${fmtD(s.reviewed_at)}</span>` : ''}</p></div>
   <div class="row noprint"><button class="btn ghost" data-act="print">Cetak atau simpan PDF</button><button class="btn" data-act="npd-ticket">Jadikan tiket</button></div></div>
   <div class="panel"><dl class="kv"><dt>Klaim</dt><dd>${a.claims.length ? a.claims.map(c => esc(lbl(CLAIMS, c))).join(', ') : '—'}</dd><dt>Bahan utama</dt><dd>${esc(a.ingredients || '—')}</dd><dt>Produsen</dt><dd>${esc(lbl(MAKERS, a.manufacturer))}</dd><dt>Negara asal</dt><dd>${esc(lbl(ORIGINS, a.origin))}${a.country ? ', ' + esc(a.country) : ''}</dd><dt>Kanal</dt><dd>${a.channels.length ? a.channels.map(c => esc(lbl(CHANNELS, c))).join(', ') : '—'}</dd></dl></div>
   ${s.ai_summary ? `<div class="note">${nl(s.ai_summary)}</div>` : ''}
   ${s.matched.length ? grp('wajib', 'Izin dan syarat wajib', 'f-tinggi') + grp('perlu_dipastikan', 'Perlu dipastikan dengan Legal', 'f-sedang')
     : `<div class="note warn"><b>Tidak ada aturan yang cocok.</b> Ini bisa berarti matriks aturan untuk kombinasi ini belum dilengkapi Legal, bukan berarti tidak ada izin yang diperlukan. Ajukan tiket ke Legal dan Compliance.</div>`}
-  <p class="small muted">Hasil ini adalah skrining awal dari matriks yang divalidasi Legal dan Compliance, bukan nasihat hukum final.</p>`;
+  ${s.reviewer_note ? `<div class="note"><b>Catatan Legal:</b> ${nl(s.reviewer_note)}</div>` : ''}
+  ${isLegal() ? `<div class="panel noprint"><h3>Review Legal</h3>
+    ${stale.length ? `<div class="note warn small"><b>Ada perubahan setelah validasi.</b> ${stale.length} aturan atau peraturan terkait diperbarui sejak ${fmtDT(s.reviewed_at)}: ${esc(stale.slice(0, 5).join('; '))}${stale.length > 5 ? ' dan lainnya' : ''}. Perbarui hasil dari matriks terbaru, lalu validasi ulang.</div>` : ''}
+    <label>Catatan Legal (opsional)</label><textarea id="npd-note">${esc(s.reviewer_note || '')}</textarea>
+    <p class="row"><button class="btn" data-act="npd-review" data-status="divalidasi">${s.review_status === 'divalidasi' ? 'Validasi ulang' : 'Validasi hasil'}</button><button class="btn ghost" data-act="npd-review" data-status="perlu_perbaikan">Perlu perbaikan</button>${s.review_status !== 'menunggu' ? '<button class="btn ghost" data-act="npd-review" data-status="menunggu">Kembalikan ke menunggu</button>' : ''}<button class="btn ghost" data-act="npd-refresh">Perbarui dari matriks terbaru</button></p>
+    <p class="small muted">Status dan catatan bisa diubah kapan saja mengikuti perubahan peraturan. Setiap perubahan tercatat di audit trail.</p></div>` : ''}
+  <p class="small muted">${s.review_status === 'divalidasi' ? `Hasil ini sudah ditinjau Legal dan Compliance pada ${fmtD(s.reviewed_at)}. Tetap bukan nasihat hukum final, dan peraturan dapat berubah.` : 'Hasil ini adalah skrining awal dari matriks yang divalidasi Legal dan Compliance, bukan nasihat hukum final.'}</p>`;
 }
+ACT['npd-review'] = t => run(t, async () => {
+  const s = S.npd; const st = t.dataset.status; const note = ($('#npd-note').value || '').trim();
+  const row = st === 'menunggu'
+    ? { review_status: st, reviewed_by: null, reviewed_at: null, reviewer_note: note || null }
+    : { review_status: st, reviewed_by: uid(), reviewed_at: new Date().toISOString(), reviewer_note: note || null };
+  await q(S.sb.from('npd_screenings').update(row).eq('id', s.id));
+  toast(st === 'divalidasi' ? 'Hasil divalidasi' : st === 'perlu_perbaikan' ? 'Ditandai perlu perbaikan' : 'Dikembalikan ke menunggu');
+  await npdDetail(s.id);
+});
+ACT['npd-refresh'] = t => run(t, async () => {
+  const s = S.npd;
+  if (!confirm('Cocokkan ulang dengan matriks aturan terbaru? Hasil lama diganti dan status kembali ke Menunggu review.')) return;
+  const matched = await q(S.sb.rpc('screen_npd', { p: s.answers }));
+  let ai = null;
+  if (matched.length) { try { ai = (await callAI('explain_npd', { answers: s.answers, matched })).result; } catch (e) { toast('Penjelasan AI tidak tersedia: ' + errMsg(e), 'err'); } }
+  const items = matched.map(m => ({ ...m, explanation: ai && ai.items ? ((ai.items.find(i => i.id === m.id) || {}).explanation || null) : null }));
+  const note = ($('#npd-note').value || '').trim();
+  await q(S.sb.from('npd_screenings').update({ matched: items, ai_summary: ai ? ai.summary || null : null, review_status: 'menunggu', reviewed_by: null, reviewed_at: null, reviewer_note: note || null }).eq('id', s.id));
+  toast('Hasil diperbarui dari matriks terbaru'); await npdDetail(s.id);
+});
 ACT['print'] = () => window.print();
 ACT['npd-ticket'] = () => {
   const s = S.npd;
@@ -1706,7 +1777,7 @@ function auditDetail(d) {
   return Object.entries(d).map(([k, v]) => v && v.lama !== undefined ? `${esc(k)}: ${esc(v.lama || '∅')} → ${esc(v.baru || '∅')}` : `${esc(k)}: ${esc(JSON.stringify(v))}`).join('<br>');
 }
 function auditDraw(full) {
-  const A = S.audit; const ents = ['', 'agreements', 'agreement_fields', 'access_grants', 'reg_documents', 'npd_rules', 'review_findings', 'tickets', 'profiles', 'app_settings', 'product_categories', 'agreement_field_defs'];
+  const A = S.audit; const ents = ['', 'agreements', 'agreement_fields', 'access_grants', 'reg_documents', 'npd_rules', 'npd_screenings', 'review_findings', 'tickets', 'profiles', 'app_settings', 'product_categories', 'agreement_field_defs'];
   const rows = A.rows.filter(r => !A.text || ((r.user_email || '') + ' ' + (r.entity_id || '') + ' ' + r.action).toLowerCase().includes(A.text.toLowerCase()));
   const tbl = `<div class="scroll"><table><thead><tr><th>Waktu</th><th>Pengguna</th><th>Tindakan</th><th>Objek</th><th>Rincian</th></tr></thead><tbody>${rows.map(r => `<tr><td class="small">${fmtDT(r.at)}</td><td class="small">${esc(r.user_email || 'sistem')}</td><td>${esc(r.action)}</td><td class="small">${esc(r.entity || '')}${r.entity_id ? '<br><span class="muted">' + esc(String(r.entity_id).slice(0, 8)) + '</span>' : ''}</td><td class="small clamp">${auditDetail(r.detail)}</td></tr>`).join('')}</tbody></table></div>${A.more ? '<p><button class="btn ghost" data-act="audit-more">Muat lebih banyak</button></p>' : ''}`;
   if (full) {
@@ -1751,7 +1822,7 @@ function setupBody() {
   <li><b>Buat proyek Supabase.</b> Salin Project URL dan anon key dari Project Settings, API.</li>
   <li><b>Jalankan skema SQL</b> (kode pertama di bawah) di SQL Editor, satu kali.</li>
   <li><b>Pasang Edge Function bernama <code>ai</code></b> (kode kedua). Di dashboard: Edge Functions, Deploy a new function, tempel kodenya. Buat kunci gratis di aistudio.google.com (Get API key), lalu di Edge Functions, Secrets, tambahkan <code>GEMINI_API_KEY</code>. Opsional: <code>GEMINI_MODEL</code> bila ingin model lain (bawaan gemini-2.5-flash).</li>
-  <li><b>Pasang Edge Function kedua bernama <code>jdih</code></b> (kode ketiga). Fungsi ini mengambil PDF peraturan dari jdih.pom.go.id untuk fitur impor di Basis regulasi dan tidak perlu secrets. Bila database sudah terpasang sebelumnya, jalankan juga <b>Migrasi v2</b> (kode keempat) di SQL Editor.</li>
+  <li><b>Pasang Edge Function kedua bernama <code>jdih</code></b> (kode ketiga). Fungsi ini mengambil PDF peraturan dari jdih.pom.go.id untuk fitur impor di Basis regulasi dan tidak perlu secrets. Bila database sudah terpasang sebelumnya, jalankan juga <b>Migrasi v2</b> (kode keempat) dan <b>Migrasi v3</b> (kode kelima, validasi Legal atas skrining NPD) di SQL Editor.</li>
   <li><b>Isi <code>SUPABASE_URL</code> dan <code>SUPABASE_ANON_KEY</code></b> di bagian atas index.html, atau biarkan kosong dan isi lewat layar pertama.</li>
   <li><b>Publikasikan di GitHub Pages:</b> unggah index.html ke repositori, lalu Settings, Pages, pilih branch dan folder root. Salin alamat Pages ke Supabase, Authentication, URL Configuration, Site URL.</li>
   <li><b>Daftar akun pertama.</b> Pengguna pertama otomatis menjadi Admin sistem. Pengguna berikutnya berstatus menunggu aktivasi sampai Admin memberi peran. Pastikan Authentication, Multi-Factor (TOTP) aktif bila ingin verifikasi dua langkah.</li>
@@ -1760,9 +1831,10 @@ function setupBody() {
   <h2>1. Skema SQL</h2><p><button class="btn sm ghost" data-act="copy" data-src="tpl-sql">Salin SQL</button></p><pre class="code" id="pre-sql"></pre>
   <h2>2. Edge Function: ai</h2><p><button class="btn sm ghost" data-act="copy" data-src="tpl-fn">Salin kode</button></p><pre class="code" id="pre-fn"></pre>
   <h2>3. Edge Function: jdih</h2><p><button class="btn sm ghost" data-act="copy" data-src="tpl-fn-jdih">Salin kode</button></p><pre class="code" id="pre-fn2"></pre>
-  <h2>4. Migrasi v2 (hanya untuk database yang sudah terpasang)</h2><p><button class="btn sm ghost" data-act="copy" data-src="tpl-sql-v2">Salin SQL</button></p><pre class="code" id="pre-sql2"></pre>`;
+  <h2>4. Migrasi v2 (hanya untuk database yang sudah terpasang)</h2><p><button class="btn sm ghost" data-act="copy" data-src="tpl-sql-v2">Salin SQL</button></p><pre class="code" id="pre-sql2"></pre>
+  <h2>5. Migrasi v3 (hanya untuk database yang sudah terpasang)</h2><p><button class="btn sm ghost" data-act="copy" data-src="tpl-sql-v3">Salin SQL</button></p><pre class="code" id="pre-sql3"></pre>`;
   $('#pre-sql').textContent = $('#tpl-sql').textContent.trim(); $('#pre-fn').textContent = $('#tpl-fn').textContent.trim();
-  $('#pre-fn2').textContent = $('#tpl-fn-jdih').textContent.trim(); $('#pre-sql2').textContent = $('#tpl-sql-v2').textContent.trim();
+  $('#pre-fn2').textContent = $('#tpl-fn-jdih').textContent.trim(); $('#pre-sql2').textContent = $('#tpl-sql-v2').textContent.trim(); $('#pre-sql3').textContent = $('#tpl-sql-v3').textContent.trim();
 }
 VIEWS.setup = async () => setupBody();
 ACT['copy'] = t => copyText($('#' + t.dataset.src).textContent.trim());
